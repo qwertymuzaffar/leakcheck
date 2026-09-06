@@ -1,0 +1,65 @@
+{
+  "name": "leakcheck",
+  "version": "0.1.0",
+  "description": "Leakage, drift and data contract checks for ML datasets in TypeScript - target leakage, train/test overlap and future-dated features; PSI, KS and chi-square drift between windows; schema, range, grain and freshness contracts; profiles and Markdown reports; zero dependencies.",
+  "keywords": [
+    "data-leakage",
+    "target-leakage",
+    "train-test-overlap",
+    "data-quality",
+    "data-contract",
+    "drift",
+    "data-drift",
+    "monitoring",
+    "mlops",
+    "psi",
+    "kolmogorov-smirnov",
+    "chi-square",
+    "validation",
+    "machine-learning"
+  ],
+  "license": "MIT",
+  "author": "Muzaffar Qosimov",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qwertymuzaffar/leakcheck.git"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "bench": "node --import tsx bench/bench.ts",
+    "prepublishOnly": "npm run build && npm test",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "npm run build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^3.0.2",
+    "@types/node": "^22.20.1",
+    "@vitest/coverage-v8": "4.1.11",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.0.8"
+  }
+}
