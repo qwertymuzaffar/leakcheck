@@ -1,7 +1,7 @@
 import { categoryCounts } from './profile';
 import { binIndex, chiSquareSurvival, mean, quantileEdges } from './stats';
 import type { Row } from './types';
-import { columnNames, inferType, isMissing, toDate, toKey, toNumber } from './values';
+import { columnNames, inferType, isMissing, toDate, toKey, toNumber, withDefaults } from './values';
 
 export interface LeakageThresholds {
   /** Association with the label (|Pearson r|, eta squared or Cramer's V) at or above this flags a feature. Default 0.95. */
@@ -207,7 +207,7 @@ function pairedNumeric(values: readonly unknown[], asDates: boolean, keep: reado
  * ```
  */
 export function detectLeakage(rows: readonly Row[], options: LeakageOptions): LeakageReport {
-  const thresholds = { ...DEFAULT_THRESHOLDS, ...options.thresholds };
+  const thresholds = withDefaults(DEFAULT_THRESHOLDS, options.thresholds);
   const minSamples = options.minSamples ?? 20;
   const maxCategoricalDistinct = options.maxCategoricalDistinct ?? 10;
   const identifierShare = options.identifierShare ?? 0.5;

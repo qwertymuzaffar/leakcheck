@@ -90,6 +90,13 @@ export function columnNames(rows: readonly Row[]): string[] {
 /** Alias of {@link columnNames}, for readability when two windows are involved. */
 export const columnNamesOf = columnNames;
 
+/** Merges options over defaults, ignoring keys whose value is undefined (as adapters and CLIs pass unset options). */
+export function withDefaults<T extends object>(defaults: T, given: Partial<T> | undefined): T {
+  const merged: T = { ...defaults };
+  if (given) for (const [key, value] of Object.entries(given)) if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
+  return merged;
+}
+
 /** Infers the narrowest type that fits every non-missing value of a column. */
 export function inferType(values: readonly unknown[]): ColumnType {
   let any = false;

@@ -90,6 +90,12 @@ describe('detectDrift', () => {
     expect(driftColumn('x', Array(30).fill('a'), Array(30).fill('a'), { numeric: ['x'] }).reason).toBe('too few numeric values');
   });
 
+  it('keeps its default thresholds when options arrive as undefined', () => {
+    const report = detectDrift(window(1, 400), window(3, 400, 400), { thresholds: { psi: undefined, pValue: undefined, missingRate: undefined }, bins: undefined, minSamples: undefined });
+    expect(report.thresholds).toEqual({ psi: 0.2, pValue: 0.05, missingRate: 0.1 });
+    expect(report.drifted).toContain('amount');
+  });
+
   it('supports equal-width bins, custom thresholds and category caps', () => {
     const reference = window(1, 500);
     const current = window(2, 500, 120);

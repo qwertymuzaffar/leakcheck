@@ -33,6 +33,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js",
+      "require": "./dist/node.cjs"
     }
   },
   "files": [
@@ -51,7 +56,8 @@
     "prepublishOnly": "npm run build && npm test",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "npm run build && changeset publish"
+    "release": "npm run build && changeset publish",
+    "build:demo": "node scripts/build-demo.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.2",
@@ -61,5 +67,9 @@
     "tsx": "^4.20.0",
     "typescript": "^5.9.2",
     "vitest": "^4.0.8"
-  }
+  },
+  "bin": {
+    "leakcheck": "./dist/cli.js"
+  },
+  "homepage": "https://qwertymuzaffar.github.io/leakcheck/"
 }
