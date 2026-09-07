@@ -56,7 +56,8 @@
     "prepublishOnly": "npm run build && npm test",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "npm run build && changeset publish"
+    "release": "npm run build && changeset publish",
+    "build:demo": "node scripts/build-demo.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.2",
@@ -69,5 +70,6 @@
   },
   "bin": {
     "leakcheck": "./dist/cli.js"
-  }
+  },
+  "homepage": "https://qwertymuzaffar.github.io/leakcheck/"
 }

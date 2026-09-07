@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>leakcheck - leakage, drift and contract checks in the browser</title>
+    <meta name="description" content="Run target leakage, train/test overlap, data drift and data contract checks on a CSV in your browser. Nothing is uploaded." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230f766e'/%3E%3Cpath d='M9 17l5 5 9-11' stroke='%23fff' stroke-width='3' fill='none'/%3E%3C/svg%3E" />
+    <style>
+      :root { --ink: #1e293b; --muted: #64748b; --rule: #e2e8f0; --bg: #f8fafc; --card: #fff; --accent: #0f766e; --bad: #b91c1c; --good: #15803d; }
+      * { box-sizing: border-box; }
+      body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: var(--ink); background: var(--bg); line-height: 1.5; }
+      header { background: #0b1220; color: #e2e8f0; padding: 28px 24px; }
+      header h1 { margin: 0 0 6px; font-size: 26px; }
+      header p { margin: 0; color: #94a3b8; max-width: 70ch; }
+      header a { color: #5eead4; }
+      main { max-width: 1180px; margin: 0 auto; padding: 20px 24px 60px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+      .card { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; }
+      .card h2 { margin: 0 0 8px; font-size: 15px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+      textarea { width: 100%; min-height: 150px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid var(--rule); border-radius: 8px; padding: 8px; resize: vertical; }
+      input[type="text"] { font: inherit; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 8px; min-width: 160px; }
+      .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+      button { font: inherit; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--rule); background: #fff; color: var(--ink); cursor: pointer; }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button:hover { filter: brightness(0.97); }
+      label { font-size: 13px; color: var(--muted); }
+      .status { font-size: 13px; color: var(--muted); margin-left: auto; }
+      #report { margin-top: 18px; }
+      #report h2 { font-size: 20px; margin: 18px 0 8px; }
+      #report h2.bad { color: var(--bad); }
+      #report h2.good { color: var(--good); }
+      #report h3 { font-size: 15px; margin: 16px 0 6px; }
+      #report table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0; display: block; overflow-x: auto; }
+      #report th, #report td { border: 1px solid var(--rule); padding: 5px 8px; text-align: left; white-space: nowrap; }
+      #report th { background: #f1f5f9; }
+      #report code { background: #f1f5f9; padding: 1px 4px; border-radius: 4px; font-size: 12px; }
+      #report ul { padding-left: 20px; }
+      .hint { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+      footer { text-align: center; color: var(--muted); font-size: 13px; padding: 20px; }
+      footer a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>leakcheck</h1>
+      <p>
+        Leakage, drift and data contract checks for ML datasets, running entirely in your browser. Paste or generate a CSV, pick the
+        label, and read the report. Nothing leaves this page.
+        <a href="https://github.com/qwertymuzaffar/leakcheck">GitHub</a> · <a href="https://www.npmjs.com/package/leakcheck">npm</a>
+      </p>
+    </header>
+    <main>
+      <div class="grid">
+        <section class="card">
+          <h2>Reference / training rows</h2>
+          <textarea id="reference" spellcheck="false" placeholder="claim_id,amount,region,paid,payout,reported_at&#10;CLM-1,1200,north,yes,1080,2024-06-01T00:00:00Z"></textarea>
+          <div class="row">
+            <button id="sample">Generate sample claims</button>
+            <button id="leaky">Generate leaky sample</button>
+            <input type="file" id="referenceFile" accept=".csv,.tsv,.txt" />
+          </div>
+          <p class="hint">The sample is 800 insurance-like claims. The leaky one adds a payout copy, a settlement code and a note timestamp from after the outcome.</p>
+        </section>
+        <section class="card">
+          <h2>Current / test rows</h2>
+          <textarea id="current" spellcheck="false" placeholder="Same columns, a later batch or the test split"></textarea>
+          <div class="row">
+            <button id="shifted">Generate shifted batch</button>
+            <button id="overlapping">Generate overlapping test split</button>
+            <input type="file" id="currentFile" accept=".csv,.tsv,.txt" />
+          </div>
+          <p class="hint">Shifted: amounts up by 40%, more claims from the west, more missing ages. Overlapping: 100 new claims plus 20 rows copied from the reference.</p>
+        </section>
+      </div>
+      <section class="card" style="margin-top: 16px">
+        <h2>Checks</h2>
+        <div class="row">
+          <label>Label column <input type="text" id="label" value="paid" /></label>
+          <label>Exclude <input type="text" id="exclude" value="claim_id" /></label>
+          <label>Label time <input type="text" id="labelTime" value="settled_at" /></label>
+          <label>Feature times <input type="text" id="featureTimes" value="last_note_at" /></label>
+          <label>Entity keys <input type="text" id="keys" value="customer_id" /></label>
+        </div>
+        <div class="row">
+          <button class="primary" data-check="leak">Leakage</button>
+          <button class="primary" data-check="overlap">Train/test overlap</button>
+          <button class="primary" data-check="drift">Drift</button>
+          <button data-check="profile">Profile</button>
+          <button data-check="infer">Infer contract</button>
+          <button data-check="validate">Validate current against inferred contract</button>
+          <span class="status" id="status">Ready. Generate or paste data, then run a check.</span>
+        </div>
+      </section>
+      <div id="report"></div>
+    </main>
+    <footer>Built with <a href="https://www.npmjs.com/package/leakcheck">leakcheck</a>, zero dependencies, MIT.</footer>
+    <script type="module">
+      import * as lc from './leakcheck.js';
+
+      const $ = (id) => document.getElementById(id);
+      const status = (text) => ($('status').textContent = text);
+
+      function rng(seed) {
+        let state = seed >>> 0;
+        return () => {
+          state = (state * 1664525 + 1013904223) >>> 0;
+          return state / 4294967296;
+        };
+      }
+      function claims(seed, count, { shift = 1, westShare = 0.2, missingAge = 0, leaky = false } = {}) {
+        const random = rng(seed);
+        const rows = [];
+        for (let i = 0; i < count; i += 1) {
+          const amount = Math.round((300 + random() * 4000) * shift);
+          const r = random();
+          const region = r < westShare ? 'west' : r < 0.5 + westShare / 2 ? 'north' : 'south';
+          const paid = random() < 0.6;
+          const reported = Date.UTC(2024, 5, 1 + Math.floor(random() * 30));
+          const row = {
+            claim_id: `CLM-${seed}-${i}`,
+            customer_id: `C${Math.floor(random() * 300)}`,
+            amount,
+            region,
+            age: random() < missingAge ? '' : 18 + Math.floor(random() * 60),
+            reported_at: new Date(reported).toISOString(),
+            settled_at: new Date(reported + 3 * 86400000).toISOString(),
+            paid: paid ? 'yes' : 'no',
+          };
+          if (leaky) {
+            row.payout = paid ? Math.round(amount * (0.8 + random() * 0.2)) : 0;
+            row.settlement_code = paid ? (random() < 0.5 ? 'PAID-FULL' : 'PAID-PART') : 'REJECTED';
+            row.last_note_at = new Date(reported + (random() < 0.3 ? 5 : 1) * 86400000).toISOString();
+          }
+          rows.push(row);
+        }
+        return rows;
+      }
+      const put = (id, rows) => ($(id).value = lc.toCsv(rows));
+      $('sample').onclick = () => { put('reference', claims(1, 800)); status('Sample reference generated.'); };
+      $('leaky').onclick = () => { put('reference', claims(1, 800, { leaky: true })); status('Leaky reference generated: try Leakage.'); };
+      $('shifted').onclick = () => { put('current', claims(2, 600, { shift: 1.4, westShare: 0.45, missingAge: 0.3, leaky: $('reference').value.includes('payout') })); status('Shifted batch generated: try Drift.'); };
+      $('overlapping').onclick = () => {
+        const reference = lc.parseCsv($('reference').value || lc.toCsv(claims(1, 800)));
+        if (!$('reference').value) put('reference', reference);
+        put('current', [...claims(3, 100, { leaky: reference[0] && 'payout' in reference[0] }), ...reference.slice(0, 20)]);
+        status('Overlapping test split generated: try Train/test overlap.');
+      };
+      for (const [file, target] of [['referenceFile', 'reference'], ['currentFile', 'current']]) {
+        $(file).onchange = async (event) => {
+          const chosen = event.target.files[0];
+          if (chosen) { $(target).value = await chosen.text(); status(`${chosen.name} loaded (${$(target).value.split('\n').length - 1} rows).`); }
+        };
+      }
+
+      const list = (id) => $(id).value.split(',').map((s) => s.trim()).filter(Boolean);
+      const rows = (id) => {
+        const text = $(id).value.trim();
+        if (!text) throw new Error(`no ${id} rows: generate or paste a CSV first`);
+        return lc.parseCsv(text);
+      };
+      const checks = {
+        leak: () => lc.leakageToMarkdown(lc.detectLeakage(rows('reference'), { label: $('label').value.trim(), exclude: list('exclude'), labelTime: $('labelTime').value.trim() || undefined, featureTimes: list('featureTimes') })),
+        overlap: () => lc.overlapToMarkdown(lc.detectOverlap(rows('reference'), rows('current'), { keys: list('keys') })),
+        drift: () => lc.driftToMarkdown(lc.detectDrift(rows('reference'), rows('current'))),
+        profile: () => lc.profileToMarkdown(lc.profile(rows('reference'))),
+        infer: () => lc.contractToMarkdown(lc.inferContract(rows('reference'), { name: 'reference' })),
+        validate: () => lc.validationToMarkdown(lc.validate(lc.inferContract(rows('reference'), { name: 'reference' }), rows('current'))),
+      };
+      for (const button of document.querySelectorAll('[data-check]')) {
+        button.onclick = () => {
+          const started = performance.now();
+          try {
+            const markdown = checks[button.dataset.check]();
+            $('report').innerHTML = render(markdown);
+            status(`${button.textContent} done in ${Math.round(performance.now() - started)} ms.`);
+          } catch (error) {
+            $('report').innerHTML = `<h2 class="bad">Error</h2><p>${escape(error.message)}</p>`;
+            status('Check failed.');
+          }
+        };
+      }
+
+      // A small Markdown renderer for the reports: headings, tables, bullet lists, paragraphs, inline code.
+      function escape(text) {
+        return text.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+      }
+      function inline(text) {
+        return escape(text).replace(/`([^`]+)`/g, '<code>$1</code>');
+      }
+      function render(markdown) {
+        const lines = markdown.split('\n');
+        const html = [];
+        let i = 0;
+        while (i < lines.length) {
+          const line = lines[i];
+          if (line.startsWith('## ')) {
+            const text = line.slice(3);
+            const bad = /invalid|drifted|flagged|found$/.test(text) && !/none found|stable|valid$/.test(text);
+            html.push(`<h2 class="${bad ? 'bad' : 'good'}">${inline(text)}</h2>`);
+            i += 1;
+          } else if (line.startsWith('### ')) {
+            html.push(`<h3>${inline(line.slice(4))}</h3>`);
+            i += 1;
+          } else if (line.startsWith('|')) {
+            const table = [];
+            while (i < lines.length && lines[i].startsWith('|')) table.push(lines[i++]);
+            const cells = (row) => row.slice(1, -1).split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, '|').trim());
+            const [head, , ...body] = table;
+            html.push('<table><thead><tr>' + cells(head).map((c) => `<th>${inline(c)}</th>`).join('') + '</tr></thead><tbody>' + body.map((row) => '<tr>' + cells(row).map((c) => `<td>${inline(c)}</td>`).join('') + '</tr>').join('') + '</tbody></table>');
+          } else if (line.startsWith('- ')) {
+            const items = [];
+            while (i < lines.length && lines[i].startsWith('- ')) items.push(lines[i++].slice(2));
+            html.push('<ul>' + items.map((item) => `<li>${inline(item)}</li>`).join('') + '</ul>');
+          } else if (line.trim() === '') {
+            i += 1;
+          } else {
+            html.push(`<p>${inline(line)}</p>`);
+            i += 1;
+          }
+        }
+        return html.join('\n');
+      }
+    </script>
+  </body>
+</html>
