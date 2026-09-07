@@ -1,7 +1,8 @@
+import { isBaseline, summarizeColumn, type Baseline, type BaselineColumn, type BaselineOptions } from './baseline';
 import { categoryCounts, numericStats, numericValues } from './profile';
-import { binCounts, chiSquareTest, jensenShannon, ksTest, psi, quantileEdges, toShares, widthEdges } from './stats';
+import { binCounts, chiSquareTest, jensenShannon, ksTest, psi, toShares } from './stats';
 import type { NumericStats, Row } from './types';
-import { columnNames, columnNamesOf, inferType, isMissing, toKey } from './values';
+import { columnNames, isMissing, withDefaults } from './values';
 
 export interface DriftThresholds {
   /** PSI above this flags a column. Default 0.2. */
@@ -12,27 +13,8 @@ export interface DriftThresholds {
   missingRate: number;
 }
 
-export interface DriftOptions {
-  /** Columns to compare; defaults to every column of the reference rows. */
-  columns?: string[];
-  /** Bins for numeric columns. Default 10. */
-  bins?: number;
-  /** `quantile` bins (equal reference mass, the default) or equal `width` bins over the reference range. */
-  binning?: 'quantile' | 'width';
+export interface DriftOptions extends BaselineOptions {
   thresholds?: Partial<DriftThresholds>;
-  /** Fewest non-missing values a column needs in each window. Default 20. */
-  minSamples?: number;
-  /** Categories kept for categorical columns; the rest merge into `other`. Default 50. */
-  maxCategories?: number;
-  /**
-   * Skip a categorical column when its distinct values exceed `maxCategories` and this share of
-   * the reference values are unique, which marks identifiers rather than categories. Default 0.5.
-   */
-  maxDistinctShare?: number;
-  /** Columns to treat as categorical even when their values look numeric. */
-  categorical?: string[];
-  /** Columns to treat as numeric even when inference would not. */
-  numeric?: string[];
 }
 
 export type DriftKind = 'numeric' | 'categorical' | 'skipped';
@@ -98,22 +80,26 @@ function summary(values: readonly unknown[]): WindowSummary {
   return { count, missing, missingRate: values.length ? missing / values.length : 0 };
 }
 
-/** Compares one column between two windows. */
-export function driftColumn(
+/** Compares a current window's values with a reference column summary. */
+export function compareColumn(
   column: string,
-  referenceValues: readonly unknown[],
+  reference: BaselineColumn,
   currentValues: readonly unknown[],
   options: DriftOptions = {},
 ): ColumnDrift {
-  const thresholds = { ...DEFAULT_THRESHOLDS, ...options.thresholds };
+  const thresholds = withDefaults(DEFAULT_THRESHOLDS, options.thresholds);
   const minSamples = options.minSamples ?? 20;
-  const reference = summary(referenceValues);
+  const referenceSummary: WindowSummary = {
+    count: reference.count,
+    missing: reference.missing,
+    missingRate: reference.count + reference.missing ? reference.missing / (reference.count + reference.missing) : 0,
+  };
   const current = summary(currentValues);
-  const missingRateDelta = current.missingRate - reference.missingRate;
+  const missingRateDelta = current.missingRate - referenceSummary.missingRate;
   const base: ColumnDrift = {
     column,
     kind: 'skipped',
-    reference,
+    reference: referenceSummary,
     current,
     psi: 0,
     jsDivergence: 0,
@@ -123,29 +109,22 @@ export function driftColumn(
     drifted: false,
   };
   const skip = (reason: string): ColumnDrift => ({ ...base, reason });
-  if (reference.count < minSamples) return skip(`only ${reference.count} reference values (minimum ${minSamples})`);
+  if (reference.kind === 'skipped') return skip(reference.reason ?? 'skipped in the reference');
   if (current.count < minSamples) return skip(`only ${current.count} current values (minimum ${minSamples})`);
 
-  const type = inferType(referenceValues);
-  const forcedCategorical = options.categorical?.includes(column) ?? false;
-  const forcedNumeric = options.numeric?.includes(column) ?? false;
-  const numeric = forcedNumeric || (!forcedCategorical && (type === 'number' || type === 'integer' || type === 'date'));
   const signals: string[] = [];
   if (Math.abs(missingRateDelta) > thresholds.missingRate) {
-    signals.push(`missing rate ${fmt(reference.missingRate)} -> ${fmt(current.missingRate)}`);
+    signals.push(`missing rate ${fmt(referenceSummary.missingRate)} -> ${fmt(current.missingRate)}`);
   }
 
   let result: ColumnDrift;
-  if (numeric) {
-    const asDates = type === 'date' && !forcedNumeric;
-    const ref = numericValues(referenceValues, asDates).sort((a, b) => a - b);
-    const cur = numericValues(currentValues, asDates).sort((a, b) => a - b);
-    if (ref.length < minSamples || cur.length < minSamples) return skip('too few numeric values');
-    const bins = options.bins ?? 10;
-    const edges = options.binning === 'width' ? widthEdges(ref[0]!, ref[ref.length - 1]!, bins) : quantileEdges(ref, bins);
-    const referenceShares = toShares(binCounts(ref, edges));
+  if (reference.kind === 'numeric') {
+    const edges = reference.edges ?? [];
+    const cur = numericValues(currentValues, reference.isDate ?? false).sort((a, b) => a - b);
+    if (cur.length < minSamples) return skip('too few numeric values');
+    const referenceShares = toShares(reference.counts ?? []);
     const currentShares = toShares(binCounts(cur, edges));
-    const ks = ksTest(ref, cur);
+    const ks = ksTest(reference.sample ?? [], cur);
     const value = psi(referenceShares, currentShares);
     if (value > thresholds.psi) signals.push(`psi ${fmt(value)} > ${fmt(thresholds.psi)}`);
     if (ks.pValue < thresholds.pValue) signals.push(`ks p=${fmt(ks.pValue)} < ${fmt(thresholds.pValue)}`);
@@ -158,26 +137,20 @@ export function driftColumn(
       jsDivergence: jensenShannon(referenceShares, currentShares),
       ks,
       bins: labels.map((label, i) => ({ label, reference: referenceShares[i]!, current: currentShares[i]! })),
-      referenceStats: numericStats(ref),
+      ...(reference.stats ? { referenceStats: reference.stats } : {}),
       currentStats: numericStats(cur),
       signals,
     };
   } else {
-    const maxCategories = options.maxCategories ?? 50;
-    const refCounts = categoryCounts(referenceValues);
-    if (refCounts.length > maxCategories && refCounts.length / reference.count > (options.maxDistinctShare ?? 0.5)) {
-      return skip(`high cardinality: ${refCounts.length} distinct values in ${reference.count} rows`);
-    }
+    const kept = reference.categories ?? [];
+    const keptSet = new Set(kept.map((c) => c.value));
     const curCounts = new Map(categoryCounts(currentValues).map((c) => [c.value, c.count]));
-    const kept = refCounts.slice(0, maxCategories).map((c) => c.value);
-    const keptSet = new Set(kept);
-    const refVector = kept.map((value) => refCounts.find((c) => c.value === value)!.count);
-    const curVector = kept.map((value) => curCounts.get(value) ?? 0);
-    let refOther = 0;
+    const refVector = kept.map((c) => c.count);
+    const curVector = kept.map((c) => curCounts.get(c.value) ?? 0);
+    const refOther = reference.other ?? 0;
     let curOther = 0;
-    for (const c of refCounts) if (!keptSet.has(c.value)) refOther += c.count;
     for (const [value, count] of curCounts) if (!keptSet.has(value)) curOther += count;
-    const labels = kept.slice();
+    const labels = kept.map((c) => c.value);
     if (refOther > 0 || curOther > 0) {
       labels.push('other');
       refVector.push(refOther);
@@ -203,32 +176,63 @@ export function driftColumn(
   return result;
 }
 
+/** Compares one column between two windows of raw values. */
+export function driftColumn(
+  column: string,
+  referenceValues: readonly unknown[],
+  currentValues: readonly unknown[],
+  options: DriftOptions = {},
+): ColumnDrift {
+  return compareColumn(column, summarizeColumn(column, referenceValues, { ...options, sampleSize: options.sampleSize ?? Infinity }), currentValues, options);
+}
+
 /**
- * Compares a current window of rows with a reference window column by column: PSI and a KS test
- * over reference-quantile bins for numeric columns (dates included), PSI and a chi-square test
- * over categories for the rest, plus the change in missing rate.
+ * Compares a current window of rows with a reference, column by column: PSI and a KS test over
+ * reference-quantile bins for numeric columns (dates included), PSI and a chi-square test over
+ * categories for the rest, plus the change in missing rate. The reference is either the rows of
+ * the reference window or a {@link Baseline} saved earlier.
  * @example
  * ```ts
  * const report = detectDrift(lastMonth, today, { thresholds: { psi: 0.1 } });
  * for (const column of report.drifted) console.log(column, report.columns[column].signals);
  * ```
  */
-export function detectDrift(reference: readonly Row[], current: readonly Row[], options: DriftOptions = {}): DriftReport {
-  const thresholds = { ...DEFAULT_THRESHOLDS, ...options.thresholds };
-  const names = options.columns ?? columnNames(reference);
-  const currentNames = new Set(columnNamesOf(current));
+export function detectDrift(reference: readonly Row[] | Baseline, current: readonly Row[], options: DriftOptions = {}): DriftReport {
+  const thresholds = withDefaults(DEFAULT_THRESHOLDS, options.thresholds);
+  const currentNames = new Set(columnNames(current));
   const columns: Record<string, ColumnDrift> = {};
   const drifted: string[] = [];
   const skipped: string[] = [];
+  const baseline = isBaseline(reference) ? reference : null;
+  const names = options.columns ?? (baseline ? Object.keys(baseline.columns) : columnNames(reference as readonly Row[]));
   for (const name of names) {
-    const referenceValues = reference.map((row) => row[name]);
+    const summarized = baseline
+      ? baseline.columns[name]
+      : summarizeColumn(
+          name,
+          (reference as readonly Row[]).map((row) => row[name]),
+          { ...options, sampleSize: options.sampleSize ?? Infinity },
+        );
     const currentValues = current.map((row) => row[name]);
-    const result = currentNames.has(name)
-      ? driftColumn(name, referenceValues, currentValues, { ...options, thresholds })
-      : { ...driftColumn(name, referenceValues, [], { ...options, thresholds, minSamples: Infinity }), reason: 'missing in the current window' };
+    let result: ColumnDrift;
+    if (!summarized) {
+      result = compareColumn(name, { kind: 'skipped', type: 'any', count: 0, missing: 0, reason: 'not in the baseline' }, currentValues, { ...options, thresholds });
+    } else if (!currentNames.has(name)) {
+      result = { ...compareColumn(name, summarized, [], { ...options, thresholds, minSamples: Infinity }), reason: 'missing in the current window' };
+    } else {
+      result = compareColumn(name, summarized, currentValues, { ...options, thresholds });
+    }
     columns[name] = result;
     if (result.kind === 'skipped') skipped.push(name);
     else if (result.drifted) drifted.push(name);
   }
-  return { ok: drifted.length === 0, reference: { rows: reference.length }, current: { rows: current.length }, thresholds, columns, drifted, skipped };
+  return {
+    ok: drifted.length === 0,
+    reference: { rows: baseline ? baseline.rows : (reference as readonly Row[]).length },
+    current: { rows: current.length },
+    thresholds,
+    columns,
+    drifted,
+    skipped,
+  };
 }

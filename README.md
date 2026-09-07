@@ -12,12 +12,20 @@ Three questions it answers about a dataset:
 - **Has the data shifted since the reference window?** PSI and a Kolmogorov-Smirnov test for numeric columns, PSI and a chi-square test for categorical ones, plus changes in missing rates, with per-bin breakdowns.
 - **Does a batch honour its contract?** Types, required values, ranges, enums, patterns, lengths, uniqueness, custom rules, the record grain, unexpected and missing columns, minimum row counts and freshness.
 
-Every check returns a plain report object and can be rendered to Markdown for a CI log, a pull request comment or a notebook.
+Every check returns a plain report object and can be rendered to Markdown for a CI log, a pull request comment or a notebook. A **baseline** saves what the checks need to know about the training window as JSON, so a monitoring job can compare each new batch without the training rows. A **CLI** runs all of it on CSV, TSV, NDJSON and JSON files.
 
 ## Install
 
 ```bash
 npm i leakcheck
+```
+
+Or run it without installing:
+
+```bash
+npx leakcheck leak claims.csv --label claim_paid --exclude claim_id
+npx leakcheck baseline train.csv --out baseline.json
+npx leakcheck drift baseline.json this_week.csv --psi 0.1
 ```
 
 ## Quick start
@@ -57,7 +65,40 @@ const report = validate(claims, thisWeekRows);
 if (!report.ok) throw new Error(`${report.issueCounts.type ?? 0} type issues, ${report.duplicateKeys} duplicate keys`);
 ```
 
-Rows are `Record<string, unknown>[]`: whatever your CSV parser, database driver or feature store hands you. Missing means `null`, `undefined`, `NaN` or a blank string. Numeric strings count as numbers and ISO strings as dates unless you turn coercion off.
+Rows are `Record<string, unknown>[]`: whatever your CSV parser, database driver or feature store hands you. Missing means `null`, `undefined`, `NaN` or a blank string. Numeric strings count as numbers and ISO strings as dates unless you turn coercion off. `parseCsv`, `parseNdjson` and `toCsv` are included for the common case, and `leakcheck/node` adds `readRows(path)` for files.
+
+## Baselines for monitoring
+
+A monitoring job should not carry the training set around. `createBaseline` keeps what drift detection needs per column: the bin edges and counts, the statistics and a bounded value sample for numeric columns, and the kept categories for categorical ones. It is plain JSON.
+
+```ts
+import { createBaseline, detectDrift } from 'leakcheck';
+
+// When the model is trained:
+const baseline = createBaseline(trainingRows, { bins: 10 });
+await fs.writeFile('baseline.json', JSON.stringify(baseline));
+
+// In the scheduled check:
+const report = detectDrift(JSON.parse(await fs.readFile('baseline.json', 'utf8')), todaysRows);
+```
+
+A report built from a baseline is identical to one built from the rows, except that the KS test uses the stored sample (2,000 evenly spaced reference values by default, `sampleSize` to change it) once the reference is larger than that. Bins, binning and category caps are fixed at baseline time; thresholds are chosen at comparison time.
+
+## Command line
+
+Every command reads `.csv`, `.tsv`, `.ndjson`, `.jsonl` or `.json` (an array of objects), prints Markdown, and exits 1 when the check fails so it can gate a pipeline. `--json` prints the report object instead, `--no-fail` always exits 0.
+
+```bash
+leakcheck leak <data> --label <column> [--exclude a,b] [--label-time col --feature-times a,b]
+leakcheck overlap <train> <test> [--keys a,b]
+leakcheck drift <reference | baseline.json> <current> [--psi 0.2] [--p-value 0.05] [--bins 10]
+leakcheck baseline <data> --out baseline.json
+leakcheck validate <contract.json> <data> [--now <iso>] [--strict]
+leakcheck infer <data> --name <name> [--out contract.json]
+leakcheck profile <data>
+```
+
+A contract file is the same object you would pass to `defineContract`, with `pattern` as a string; custom `check` functions are only available from code. `leakcheck --help` lists every option.
 
 ## Leakage
 
@@ -110,6 +151,10 @@ Rules of thumb for PSI: below 0.1 stable, 0.1 to 0.25 worth a look, above 0.25 a
 
 The statistics are exported too, for your own checks: `psi`, `jensenShannon`, `ksTest`, `chiSquareTest`, `contingencyChiSquare`, `cramersV`, `etaSquared`, `pearson`, `quantile`, `quantileEdges`, `binCounts`, and the incomplete gamma functions behind the p-values.
 
+## Browser demo
+
+The docs site at https://qwertymuzaffar.github.io/leakcheck/ runs the checks in the browser on a CSV you paste or generate, with nothing uploaded anywhere.
+
 ## Performance
 
 Synthetic data, 100,000 rows by 8 columns, Node 20 on an M1 Pro laptop (`npm run bench`):
@@ -130,7 +175,7 @@ Everything is linear in the number of rows apart from the sorts behind quantiles
 - Association thresholds are deliberately high (0.95). Lower them to hunt for strong but legitimate features, and expect to review the results.
 - The KS p-value uses the asymptotic distribution with a small-sample correction; the chi-square tests use the usual expected-count approximation. Both are fine for the sample sizes drift monitoring deals with and are not meant as substitutes for a statistics package.
 - Longitudes, categories that wrap, and other domain-specific bins are not special-cased; pass `bins`, `binning` or your own `columns` selection when the defaults do not fit.
-- There is no I/O: reading CSV or Parquet, scheduling, alerting and storing reports are up to the caller.
+- I/O is limited to the CSV, NDJSON and JSON readers; Parquet, databases, scheduling, alerting and storing reports are up to the caller.
 
 ## License
 

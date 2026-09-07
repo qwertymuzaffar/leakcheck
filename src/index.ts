@@ -1,6 +1,8 @@
 export type { CategoryCount, ColumnProfile, ColumnType, DatasetProfile, Histogram, NumericStats, Row } from './types';
 export { columnNames, inferType, isMissing, matchesType, toBoolean, toDate, toKey, toNumber } from './values';
 export { formatDuration, parseDuration } from './duration';
+export { parseCsv, parseNdjson, splitCsv, toCsv, type CsvOptions } from './csv';
+export { createBaseline, isBaseline, subsample, summarizeColumn, type Baseline, type BaselineColumn, type BaselineOptions } from './baseline';
 export {
   binCounts,
   binIndex,
@@ -37,6 +39,7 @@ export {
   type ValidationReport,
 } from './contract';
 export {
+  compareColumn,
   detectDrift,
   driftColumn,
   type ColumnDrift,

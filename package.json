@@ -33,6 +33,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js",
+      "require": "./dist/node.cjs"
     }
   },
   "files": [
@@ -61,5 +66,8 @@
     "tsx": "^4.20.0",
     "typescript": "^5.9.2",
     "vitest": "^4.0.8"
+  },
+  "bin": {
+    "leakcheck": "./dist/cli.js"
   }
 }
