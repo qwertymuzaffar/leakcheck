@@ -1,6 +1,6 @@
 {
   "name": "leakcheck",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Leakage, drift and data contract checks for ML datasets in TypeScript - target leakage, train/test overlap and future-dated features; PSI, KS and chi-square drift between windows; schema, range, grain and freshness contracts; profiles and Markdown reports; zero dependencies.",
   "keywords": [
     "data-leakage",
