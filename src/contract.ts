@@ -255,6 +255,8 @@ export function validate(contract: Contract, rows: readonly Row[], options: Vali
     const allowed = spec.enum ? new Set(spec.enum.map(toKey)) : null;
     const pattern = spec.pattern !== undefined ? toRegExp(spec.pattern, name) : null;
     const seen = spec.unique ? new Set<string>() : null;
+    /** One invalid value in this column: every such issue is an error carrying the row and the value. */
+    const invalid = (row: number, value: unknown, code: IssueCode, message: string) => push({ code, severity: 'error', column: name, row, value, message });
     for (let i = 0; i < rows.length; i += 1) {
       const row = rows[i]!;
       const value = row[name];
@@ -265,44 +267,24 @@ export function validate(contract: Contract, rows: readonly Row[], options: Vali
       }
       summary.count += 1;
       if (!(coerce ? matchesType(value, type) : strictType(value, type))) {
-        push({ code: 'type', severity: 'error', column: name, row: i, value, message: `"${name}" should be ${type}, got ${describe(value)}` });
+        invalid(i, value, 'type', `"${name}" should be ${type}, got ${describe(value)}`);
         continue;
       }
-      if (min !== null || max !== null) {
-        const n = comparable(value, type);
-        if (n !== null) {
-          if (min !== null && n < min) {
-            push({ code: 'min', severity: 'error', column: name, row: i, value, message: `"${name}" ${describe(value)} is below ${describe(spec.min)}` });
-          }
-          if (max !== null && n > max) {
-            push({ code: 'max', severity: 'error', column: name, row: i, value, message: `"${name}" ${describe(value)} is above ${describe(spec.max)}` });
-          }
-        }
-      }
+      const comparableValue = min !== null || max !== null ? comparable(value, type) : null;
+      if (comparableValue !== null && min !== null && comparableValue < min) invalid(i, value, 'min', `"${name}" ${describe(value)} is below ${describe(spec.min)}`);
+      if (comparableValue !== null && max !== null && comparableValue > max) invalid(i, value, 'max', `"${name}" ${describe(value)} is above ${describe(spec.max)}`);
       const key = toKey(value);
-      if (allowed && !allowed.has(key)) {
-        push({ code: 'enum', severity: 'error', column: name, row: i, value, message: `"${name}" ${describe(value)} is not one of the allowed values` });
-      }
-      if (pattern && !pattern.test(key)) {
-        push({ code: 'pattern', severity: 'error', column: name, row: i, value, message: `"${name}" ${describe(value)} does not match ${pattern}` });
-      }
-      if (typeof value === 'string') {
-        if (spec.minLength !== undefined && value.length < spec.minLength) {
-          push({ code: 'length', severity: 'error', column: name, row: i, value, message: `"${name}" is shorter than ${spec.minLength}` });
-        }
-        if (spec.maxLength !== undefined && value.length > spec.maxLength) {
-          push({ code: 'length', severity: 'error', column: name, row: i, value, message: `"${name}" is longer than ${spec.maxLength}` });
-        }
-      }
+      if (allowed && !allowed.has(key)) invalid(i, value, 'enum', `"${name}" ${describe(value)} is not one of the allowed values`);
+      if (pattern && !pattern.test(key)) invalid(i, value, 'pattern', `"${name}" ${describe(value)} does not match ${pattern}`);
+      if (typeof value === 'string' && spec.minLength !== undefined && value.length < spec.minLength) invalid(i, value, 'length', `"${name}" is shorter than ${spec.minLength}`);
+      if (typeof value === 'string' && spec.maxLength !== undefined && value.length > spec.maxLength) invalid(i, value, 'length', `"${name}" is longer than ${spec.maxLength}`);
       if (seen) {
-        if (seen.has(key)) push({ code: 'unique', severity: 'error', column: name, row: i, value, message: `"${name}" ${describe(value)} repeats` });
+        if (seen.has(key)) invalid(i, value, 'unique', `"${name}" ${describe(value)} repeats`);
         else seen.add(key);
       }
       if (spec.check) {
         const verdict = spec.check(value, row);
-        if (verdict === false || typeof verdict === 'string') {
-          push({ code: 'check', severity: 'error', column: name, row: i, value, message: verdict || `"${name}" failed its check` });
-        }
+        if (verdict === false || typeof verdict === 'string') invalid(i, value, 'check', verdict || `"${name}" failed its check`);
       }
     }
   }
