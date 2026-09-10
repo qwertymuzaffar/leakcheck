@@ -205,6 +205,164 @@ function pairedNumeric(values: readonly unknown[], asDates: boolean, keep: reado
   return out;
 }
 
+/** Everything a feature is analyzed against: the label's values and keys, plus the options in force. */
+interface LabelContext {
+  rows: readonly Row[];
+  thresholds: LeakageThresholds;
+  minSamples: number;
+  maxCategoricalDistinct: number;
+  identifierShare: number;
+  bins: number | undefined;
+  labelValues: readonly unknown[];
+  labelKind: Kind;
+  labelIsDate: boolean;
+  /** The label's text key per row, null where the label is missing. */
+  labelKeys: readonly (string | null)[];
+  labelTime: string | undefined;
+  /** The label time per row in epoch ms, null where missing; null altogether without `labelTime`. */
+  labelTimes: readonly (number | null)[] | null;
+}
+
+function labelContext(rows: readonly Row[], options: LeakageOptions): LabelContext {
+  const maxCategoricalDistinct = options.maxCategoricalDistinct ?? 10;
+  const labelValues = rows.map((row) => row[options.label]);
+  return {
+    rows,
+    thresholds: withDefaults(DEFAULT_THRESHOLDS, options.thresholds),
+    minSamples: options.minSamples ?? 20,
+    maxCategoricalDistinct,
+    identifierShare: options.identifierShare ?? 0.5,
+    bins: options.bins,
+    labelValues,
+    labelKind: kindOf(labelValues, maxCategoricalDistinct),
+    labelIsDate: inferType(labelValues) === 'date',
+    labelKeys: labelValues.map((value) => (isMissing(value) ? null : toKey(value))),
+    labelTime: options.labelTime,
+    labelTimes: options.labelTime ? rows.map((row) => toDate(row[options.labelTime!])?.getTime() ?? null) : null,
+  };
+}
+
+/** A feature's values lined up with the label, restricted to the rows where both are present. */
+interface FeatureSample {
+  values: readonly unknown[];
+  isDate: boolean;
+  keep: readonly boolean[];
+  keptLabelKeys: readonly string[];
+}
+
+type AssociationRule = (sample: FeatureSample, context: LabelContext) => { measure: AssociationMeasure; value: number };
+
+const keptFeatureKeys = (sample: FeatureSample): string[] => sample.values.filter((_, index) => sample.keep[index]).map(toKey);
+
+/** Which association measure fits each feature-kind / label-kind pair, and how it is computed. */
+const ASSOCIATION_RULES: Record<`${Kind}/${Kind}`, AssociationRule> = {
+  'numeric/numeric': (sample, context) => ({
+    measure: 'pearson',
+    value: Math.abs(pearson(pairedNumeric(sample.values, sample.isDate, sample.keep), pairedNumeric(context.labelValues, context.labelIsDate, sample.keep))),
+  }),
+  // A numeric feature can determine a categorical label without a linear pattern (zero when
+  // not paid, anything else when paid), so the binned Cramer's V is tried as well.
+  'numeric/categorical': (sample, context) => {
+    const numbers = pairedNumeric(sample.values, sample.isDate, sample.keep);
+    const eta = etaSquared(numbers, sample.keptLabelKeys);
+    const binned = cramersV(binnedKeys(numbers, context.bins), sample.keptLabelKeys);
+    if (Number.isNaN(eta) || (!Number.isNaN(binned) && binned > eta)) return { measure: 'binned-cramers-v', value: binned };
+    return { measure: 'eta-squared', value: eta };
+  },
+  'categorical/numeric': (sample, context) => ({
+    measure: 'eta-squared',
+    value: etaSquared(pairedNumeric(context.labelValues, context.labelIsDate, sample.keep), keptFeatureKeys(sample)),
+  }),
+  'categorical/categorical': (sample) => ({ measure: 'cramers-v', value: cramersV(keptFeatureKeys(sample), sample.keptLabelKeys) }),
+};
+
+function associationFor(kind: Kind, labelKind: Kind): AssociationRule {
+  return ASSOCIATION_RULES[`${kind}/${labelKind}`];
+}
+
+/** Share of the paired rows where the feature's text equals the label's text. */
+function labelCopyShare(values: readonly unknown[], keep: readonly boolean[], labelKeys: readonly (string | null)[]): number {
+  const pairs = keep.filter(Boolean).length;
+  let copies = 0;
+  for (let index = 0; index < values.length; index += 1) if (keep[index] && toKey(values[index]) === labelKeys[index]) copies += 1;
+  return pairs ? copies / pairs : 0;
+}
+
+/** A categorical column with far more distinct values than categories usually identifies rows, not patterns. */
+function looksLikeIdentifier(kind: Kind, values: readonly unknown[], pairs: number, context: LabelContext): { identifier: boolean; distinct: number } {
+  const distinct = categoryCounts(values).length;
+  const identifier =
+    kind === 'categorical' && inferType(values) !== 'boolean' && distinct > context.maxCategoricalDistinct && distinct / pairs > context.identifierShare;
+  return { identifier, distinct };
+}
+
+/** One feature against the label: the label-copy share, the identifier heuristic, and the association measure. */
+function analyzeFeature(name: string, context: LabelContext): FeatureLeakage {
+  const { thresholds, labelKeys } = context;
+  const values = context.rows.map((row) => row[name]);
+  const keep = values.map((value, index) => !isMissing(value) && labelKeys[index] !== null);
+  const pairs = keep.filter(Boolean).length;
+  const copyShare = labelCopyShare(values, keep, labelKeys);
+  const base: FeatureLeakage = { column: name, kind: 'skipped', pairs, labelCopyShare: copyShare, identifier: false, signals: [], flagged: false };
+  if (pairs < context.minSamples) return { ...base, reason: `only ${pairs} rows with both "${name}" and the label` };
+
+  const signals: string[] = [];
+  if (copyShare >= thresholds.labelCopy) signals.push(`equals the label in ${fmt(copyShare * 100)}% of rows`);
+  const kind = kindOf(values, context.maxCategoricalDistinct);
+  const { identifier, distinct } = looksLikeIdentifier(kind, values, pairs, context);
+  if (identifier) signals.push(`looks like an identifier: ${distinct} distinct values in ${pairs} rows`);
+
+  let measure: AssociationMeasure | undefined;
+  let association: number | undefined;
+  if (!identifier) {
+    const sample: FeatureSample = { values, isDate: inferType(values) === 'date', keep, keptLabelKeys: labelKeys.filter((_, index) => keep[index]) as string[] };
+    const result = associationFor(kind, context.labelKind)(sample, context);
+    measure = result.measure;
+    if (!Number.isNaN(result.value)) association = result.value;
+    if (association !== undefined && association >= thresholds.association) signals.push(`${measure} ${fmt(association)} >= ${fmt(thresholds.association)}`);
+  }
+  return {
+    ...base,
+    kind,
+    ...(measure ? { measure } : {}),
+    ...(association !== undefined ? { association } : {}),
+    identifier,
+    signals,
+    flagged: signals.length > 0,
+  };
+}
+
+/** A feature time column against the label time: the share of rows observed after the label was known. */
+function futureDatedFeature(column: string, context: LabelContext): FeatureLeakage {
+  const labelTimes = context.labelTimes ?? [];
+  const times = context.rows.map((row) => toDate(row[column])?.getTime() ?? null);
+  let compared = 0;
+  let future = 0;
+  for (let index = 0; index < times.length; index += 1) {
+    if (times[index] === null || labelTimes[index] === null) continue;
+    compared += 1;
+    if (times[index]! > labelTimes[index]!) future += 1;
+  }
+  const share = compared ? future / compared : 0;
+  const entry: FeatureLeakage = {
+    column,
+    kind: compared >= context.minSamples ? 'numeric' : 'skipped',
+    pairs: compared,
+    labelCopyShare: 0,
+    futureShare: share,
+    identifier: false,
+    signals: [],
+    flagged: false,
+  };
+  if (compared < context.minSamples) {
+    entry.reason = `only ${compared} rows with both "${column}" and "${context.labelTime}"`;
+  } else if (share > context.thresholds.future) {
+    entry.signals.push(`observed after "${context.labelTime}" in ${fmt(share * 100)}% of rows (${future})`);
+    entry.flagged = true;
+  }
+  return entry;
+}
+
 /**
  * Looks for target leakage among the features of a labelled dataset: features that are near
  * copies of the label, features almost perfectly associated with it (Pearson, eta squared or
@@ -222,127 +380,24 @@ function pairedNumeric(values: readonly unknown[], asDates: boolean, keep: reado
  * ```
  */
 export function detectLeakage(rows: readonly Row[], options: LeakageOptions): LeakageReport {
-  const thresholds = withDefaults(DEFAULT_THRESHOLDS, options.thresholds);
-  const minSamples = options.minSamples ?? 20;
-  const maxCategoricalDistinct = options.maxCategoricalDistinct ?? 10;
-  const identifierShare = options.identifierShare ?? 0.5;
+  const context = labelContext(rows, options);
   const excluded = new Set(
     [options.label, options.labelTime, ...(options.featureTimes ?? []), ...(options.exclude ?? [])].filter((c): c is string => !!c),
   );
   const names = (options.features ?? columnNames(rows)).filter((name) => !excluded.has(name));
-  const labelValues = rows.map((row) => row[options.label]);
-  const labelKind = kindOf(labelValues, maxCategoricalDistinct);
-  const labelIsDate = inferType(labelValues) === 'date';
-  const labelKeys = labelValues.map((v) => (isMissing(v) ? null : toKey(v)));
-  const labelTimes = options.labelTime ? rows.map((row) => toDate(row[options.labelTime!])?.getTime() ?? null) : null;
 
   const features: Record<string, FeatureLeakage> = {};
   const flagged: string[] = [];
   const skipped: string[] = [];
-  for (const name of names) {
-    const values = rows.map((row) => row[name]);
-    const keep = values.map((v, i) => !isMissing(v) && labelKeys[i] !== null);
-    const pairs = keep.filter(Boolean).length;
-    let copies = 0;
-    for (let i = 0; i < values.length; i += 1) if (keep[i] && toKey(values[i]) === labelKeys[i]) copies += 1;
-    const labelCopyShare = pairs ? copies / pairs : 0;
-    const base: FeatureLeakage = { column: name, kind: 'skipped', pairs, labelCopyShare, identifier: false, signals: [], flagged: false };
-    if (pairs < minSamples) {
-      features[name] = { ...base, reason: `only ${pairs} rows with both "${name}" and the label` };
-      skipped.push(name);
-      continue;
-    }
-    const signals: string[] = [];
-    if (labelCopyShare >= thresholds.labelCopy) signals.push(`equals the label in ${fmt(labelCopyShare * 100)}% of rows`);
+  const collect = (entry: FeatureLeakage) => {
+    features[entry.column] = entry;
+    if (entry.reason !== undefined) skipped.push(entry.column);
+    else if (entry.flagged) flagged.push(entry.column);
+  };
+  for (const name of names) collect(analyzeFeature(name, context));
+  if (context.labelTimes) for (const column of options.featureTimes ?? []) collect(futureDatedFeature(column, context));
 
-    const kind = kindOf(values, maxCategoricalDistinct);
-    const type = inferType(values);
-    const distinct = categoryCounts(values).length;
-    const identifier = kind === 'categorical' && type !== 'boolean' && distinct > maxCategoricalDistinct && distinct / pairs > identifierShare;
-    if (identifier) signals.push(`looks like an identifier: ${distinct} distinct values in ${pairs} rows`);
-
-    let measure: AssociationMeasure | undefined;
-    let association: number | undefined;
-    if (!identifier) {
-      const keptLabelKeys = labelKeys.filter((_, i) => keep[i]) as string[];
-      const keptFeatureKeys = () => values.filter((_, i) => keep[i]).map(toKey);
-      let raw: number;
-      if (kind === 'numeric' && labelKind === 'numeric') {
-        measure = 'pearson';
-        raw = Math.abs(pearson(pairedNumeric(values, type === 'date', keep), pairedNumeric(labelValues, labelIsDate, keep)));
-      } else if (kind === 'numeric') {
-        // A numeric feature can determine a categorical label without a linear pattern (zero when
-        // not paid, anything else when paid), so the binned Cramer's V is tried as well.
-        const numbers = pairedNumeric(values, type === 'date', keep);
-        const eta = etaSquared(numbers, keptLabelKeys);
-        const binned = cramersV(binnedKeys(numbers, options.bins), keptLabelKeys);
-        if (Number.isNaN(eta) || (!Number.isNaN(binned) && binned > eta)) {
-          measure = 'binned-cramers-v';
-          raw = binned;
-        } else {
-          measure = 'eta-squared';
-          raw = eta;
-        }
-      } else if (labelKind === 'numeric') {
-        measure = 'eta-squared';
-        raw = etaSquared(pairedNumeric(labelValues, labelIsDate, keep), keptFeatureKeys());
-      } else {
-        measure = 'cramers-v';
-        raw = cramersV(keptFeatureKeys(), keptLabelKeys);
-      }
-      if (!Number.isNaN(raw)) association = raw;
-      if (association !== undefined && association >= thresholds.association) {
-        signals.push(`${measure} ${fmt(association)} >= ${fmt(thresholds.association)}`);
-      }
-    }
-
-    features[name] = {
-      ...base,
-      kind,
-      ...(measure ? { measure } : {}),
-      ...(association !== undefined ? { association } : {}),
-      identifier,
-      signals,
-      flagged: signals.length > 0,
-    };
-    if (signals.length) flagged.push(name);
-  }
-
-  // Future-dated features: each listed feature time column is compared with the label time.
-  if (labelTimes && options.featureTimes) {
-    for (const column of options.featureTimes) {
-      const times = rows.map((row) => toDate(row[column])?.getTime() ?? null);
-      let compared = 0;
-      let future = 0;
-      for (let i = 0; i < rows.length; i += 1) {
-        if (times[i] === null || labelTimes[i] === null) continue;
-        compared += 1;
-        if (times[i]! > labelTimes[i]!) future += 1;
-      }
-      const share = compared ? future / compared : 0;
-      const entry: FeatureLeakage = {
-        column,
-        kind: compared >= minSamples ? 'numeric' : 'skipped',
-        pairs: compared,
-        labelCopyShare: 0,
-        futureShare: share,
-        identifier: false,
-        signals: [],
-        flagged: false,
-      };
-      if (compared < minSamples) {
-        entry.reason = `only ${compared} rows with both "${column}" and "${options.labelTime}"`;
-        skipped.push(column);
-      } else if (share > thresholds.future) {
-        entry.signals.push(`observed after "${options.labelTime}" in ${fmt(share * 100)}% of rows (${future})`);
-        entry.flagged = true;
-        flagged.push(column);
-      }
-      features[column] = entry;
-    }
-  }
-
-  return { ok: flagged.length === 0, label: options.label, labelKind, rows: rows.length, thresholds, features, flagged, skipped };
+  return { ok: flagged.length === 0, label: options.label, labelKind: context.labelKind, rows: rows.length, thresholds: context.thresholds, features, flagged, skipped };
 }
 
 export interface OverlapOptions {
