@@ -30,6 +30,12 @@ export interface LeakageOptions {
   maxCategoricalDistinct?: number;
   /** Flag categorical features whose distinct values exceed this share of the rows as identifiers. Default 0.5. */
   identifierShare?: number;
+  /**
+   * Quantile bins for the binned Cramer's V of a numeric feature against a categorical label.
+   * Defaults to `associationBins(rows)`: the square root of a third of the rows compared, clamped
+   * to 2..10, so 60 rows get 4 bins and 300 or more get 10.
+   */
+  bins?: number;
 }
 
 export type AssociationMeasure = 'pearson' | 'eta-squared' | 'cramers-v' | 'binned-cramers-v';
@@ -162,10 +168,19 @@ export function cramersV(a: readonly string[], b: readonly string[], corrected =
   return denominator > 0 ? Math.sqrt(phi / denominator) : 0;
 }
 
+/**
+ * Default number of quantile bins for the binned Cramer's V, scaled with the sample size. The
+ * bias correction subtracts a term that grows with the bin count, so ten bins on a few dozen rows
+ * pull a perfect proxy below the association threshold; fewer, fuller bins keep it near 1.
+ */
+export function associationBins(sampleSize: number): number {
+  return Math.min(10, Math.max(2, Math.floor(Math.sqrt(sampleSize / 3))));
+}
+
 /** Keys of numeric values binned by reference quantiles, so a nonlinear rule can be tested as categories. */
-function binnedKeys(values: readonly number[], bins = 10): string[] {
+function binnedKeys(values: readonly number[], bins?: number): string[] {
   const finite = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
-  const edges = quantileEdges(finite, bins);
+  const edges = quantileEdges(finite, bins ?? associationBins(finite.length));
   return values.map((v) => (Number.isFinite(v) ? String(binIndex(v, edges)) : 'missing'));
 }
 
@@ -260,7 +275,7 @@ export function detectLeakage(rows: readonly Row[], options: LeakageOptions): Le
         // not paid, anything else when paid), so the binned Cramer's V is tried as well.
         const numbers = pairedNumeric(values, type === 'date', keep);
         const eta = etaSquared(numbers, keptLabelKeys);
-        const binned = cramersV(binnedKeys(numbers), keptLabelKeys);
+        const binned = cramersV(binnedKeys(numbers, options.bins), keptLabelKeys);
         if (Number.isNaN(eta) || (!Number.isNaN(binned) && binned > eta)) {
           measure = 'binned-cramers-v';
           raw = binned;

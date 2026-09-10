@@ -89,7 +89,7 @@ A report built from a baseline is identical to one built from the rows, except t
 Every command reads `.csv`, `.tsv`, `.ndjson`, `.jsonl` or `.json` (an array of objects), prints Markdown, and exits 1 when the check fails so it can gate a pipeline. `--json` prints the report object instead, `--no-fail` always exits 0.
 
 ```bash
-leakcheck leak <data> --label <column> [--exclude a,b] [--label-time col --feature-times a,b]
+leakcheck leak <data> --label <column> [--exclude a,b] [--label-time col --feature-times a,b] [--bins n]
 leakcheck overlap <train> <test> [--keys a,b]
 leakcheck drift <reference | baseline.json> <current> [--psi 0.2] [--p-value 0.05] [--bins 10]
 leakcheck baseline <data> --out baseline.json
@@ -115,7 +115,7 @@ Why two measures for a numeric feature? A payout that is zero when a claim was r
 
 Why bias-correct Cramér's V? A table with many sparse cells (a column with hundreds of categories against a binary label) scores high by chance in the classic formula. The Bergsma correction removes that, so a high value means something.
 
-Numeric columns with at most 10 distinct values (`maxCategoricalDistinct`) are treated as categories, which is what tiers, codes and 0/1 flags are. Everything is configurable through `thresholds`, `minSamples`, `features`, `exclude` and `identifierShare`.
+Numeric columns with at most 10 distinct values (`maxCategoricalDistinct`) are treated as categories, which is what tiers, codes and 0/1 flags are. Everything is configurable through `thresholds`, `minSamples`, `features`, `exclude`, `identifierShare` and `bins`.
 
 `detectOverlap(train, test, { keys })` reports test rows whose entity key exists in train (the classic "same customer on both sides of the split") and test rows that are exact duplicates of a train row over the compared columns.
 
@@ -174,6 +174,7 @@ Everything is linear in the number of rows apart from the sorts behind quantiles
 - Leakage detection is a screen, not a proof. It finds the obvious cases (copies, proxies, identifiers, post-outcome timestamps) and cannot see leakage that lives in how the features were computed. Use it to catch mistakes early, then still audit the feature pipeline.
 - Association thresholds are deliberately high (0.95). Lower them to hunt for strong but legitimate features, and expect to review the results.
 - The KS p-value uses the asymptotic distribution with a small-sample correction; the chi-square tests use the usual expected-count approximation. Both are fine for the sample sizes drift monitoring deals with and are not meant as substitutes for a statistics package.
+- The binned Cramér's V for a numeric feature uses the square root of a third of the rows as its bin count, clamped to 2..10, so 60 rows get 4 bins and 300 or more get 10. The bias correction charges for every bin, and ten bins on a few dozen rows pushed a perfect proxy below the 0.95 threshold; pass `bins` to fix the count.
 - Longitudes, categories that wrap, and other domain-specific bins are not special-cased; pass `bins`, `binning` or your own `columns` selection when the defaults do not fit.
 - I/O is limited to the CSV, NDJSON and JSON readers; Parquet, databases, scheduling, alerting and storing reports are up to the caller.
 

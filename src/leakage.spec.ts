@@ -1,4 +1,4 @@
-import { contingencyChiSquare, cramersV, detectLeakage, detectOverlap, etaSquared, pearson } from './leakage';
+import { associationBins, contingencyChiSquare, cramersV, detectLeakage, detectOverlap, etaSquared, pearson } from './leakage';
 import { leakageToMarkdown, overlapToMarkdown } from './report';
 import type { Row } from './types';
 
@@ -173,6 +173,27 @@ describe('detectLeakage', () => {
     expect(thin.skipped).toContain('last_note_at');
     expect(thin.features.last_note_at!.reason).toMatch(/only 10 rows/);
     expect(thin.ok).toBe(true);
+  });
+
+  it('scales the association bins with the sample size so a small sample still flags a perfect proxy', () => {
+    expect([5, 30, 60, 100, 200, 300, 5000].map(associationBins)).toEqual([2, 3, 4, 5, 8, 10, 10]);
+
+    // 60 claims: the payout is zero exactly when the claim was rejected, a perfect proxy for the label.
+    const rows = claims(1, 60);
+    const report = detectLeakage(rows, { label: 'paid', features: ['payout', 'amount', 'age'] });
+    const payout = report.features.payout!;
+    expect(payout.measure).toBe('binned-cramers-v');
+    expect(payout.association).toBeGreaterThan(0.95);
+    expect(payout.flagged).toBe(true);
+    for (const honest of ['amount', 'age']) {
+      expect(report.features[honest]!.association).toBeLessThan(0.5);
+      expect(report.features[honest]!.flagged).toBe(false);
+    }
+
+    // The explicit override is respected: ten bins on 60 rows is what used to miss the proxy.
+    const tenBins = detectLeakage(rows, { label: 'paid', features: ['payout'], bins: 10 });
+    expect(tenBins.features.payout!.association).toBeLessThan(payout.association!);
+    expect(tenBins.features.payout!.association).toBeLessThan(0.95);
   });
 
   it('renders markdown', () => {

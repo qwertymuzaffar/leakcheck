@@ -26,7 +26,7 @@ const USAGE = `leakcheck - leakage, drift and data contract checks for ML datase
 Usage:
   leakcheck leak <data> --label <column> [--exclude a,b] [--features a,b]
                         [--label-time <column> --feature-times a,b]
-                        [--association 0.95] [--label-copy 0.99] [--future 0]
+                        [--association 0.95] [--label-copy 0.99] [--future 0] [--bins n]
   leakcheck overlap <train> <test> [--keys a,b] [--columns a,b]
   leakcheck drift <reference | baseline.json> <current> [--columns a,b] [--bins 10]
                         [--binning quantile|width] [--psi 0.2] [--p-value 0.05]
@@ -158,6 +158,7 @@ export async function run(argv: readonly string[], io: CliIO = defaultIO()): Pro
           labelTime: text(flags, 'label-time'),
           featureTimes: list(flags, 'feature-times'),
           minSamples: number(flags, 'min-samples'),
+          bins: number(flags, 'bins'),
           thresholds: { association: number(flags, 'association'), labelCopy: number(flags, 'label-copy'), future: number(flags, 'future') },
         });
         emit(report, () => leakageToMarkdown(report));
