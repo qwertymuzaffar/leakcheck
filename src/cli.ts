@@ -128,6 +128,118 @@ function version(): string {
   }
 }
 
+/** What every command receives besides its positional inputs. */
+interface CommandContext {
+  flags: Parsed['flags'];
+  io: CliIO;
+  /** `--json`: reports print as JSON instead of Markdown. */
+  asJson: boolean;
+}
+
+/**
+ * What a command produced. A `report` with its `markdown` rendering is printed by `run` in the
+ * requested format; a command that wrote its own output returns neither. `ok` is the check's
+ * verdict and decides the exit code; commands that only describe data leave it unset.
+ */
+interface CommandResult {
+  report?: unknown;
+  markdown?: () => string;
+  ok?: boolean;
+}
+
+/** A positional input: what it is called in usage errors, and how it is read. */
+interface Input<Value> {
+  what: string;
+  read: (path: string) => Promise<Value>;
+}
+
+type Inputs<Values extends readonly unknown[]> = { readonly [Index in keyof Values]: Input<Values[Index]> };
+
+interface Command<Values extends readonly unknown[] = readonly unknown[]> {
+  /** Positional inputs in order; `run` reads them before the command sees them. */
+  inputs: Inputs<Values>;
+  run(values: Values, context: CommandContext): Promise<CommandResult>;
+}
+
+const command = <const Values extends readonly unknown[]>(inputs: Inputs<Values>, run: Command<Values>['run']): Command<Values> => ({ inputs, run });
+
+const rowsFile = (what = 'data file'): Input<readonly Row[]> => ({ what, read: readRows });
+const referenceFile: Input<readonly Row[] | Baseline> = { what: 'reference file', read: readReference };
+const contractFile: Input<Contract> = { what: 'contract file', read: async (path) => defineContract(await readJson<Contract>(path)) };
+
+/** A checked report: `run` prints it and its `ok` decides the exit code. */
+const checked = (report: { ok: boolean }, markdown: () => string): CommandResult => ({ report, markdown, ok: report.ok });
+
+const commands: Record<string, Command> = {
+  leak: command([rowsFile()], async ([rows], { flags }) => {
+    const label = text(flags, 'label');
+    if (!label) throw new UsageError('--label is required');
+    const report = detectLeakage(rows, {
+      label,
+      features: list(flags, 'features'),
+      exclude: list(flags, 'exclude'),
+      labelTime: text(flags, 'label-time'),
+      featureTimes: list(flags, 'feature-times'),
+      minSamples: number(flags, 'min-samples'),
+      bins: number(flags, 'bins'),
+      thresholds: { association: number(flags, 'association'), labelCopy: number(flags, 'label-copy'), future: number(flags, 'future') },
+    });
+    return checked(report, () => leakageToMarkdown(report));
+  }),
+  overlap: command([rowsFile('train file'), rowsFile('test file')], async ([train, test], { flags }) => {
+    const report = detectOverlap(train, test, { keys: list(flags, 'keys'), columns: list(flags, 'columns'), examples: number(flags, 'examples') });
+    return checked(report, () => overlapToMarkdown(report));
+  }),
+  drift: command([referenceFile, rowsFile('current file')], async ([reference, current], { flags }) => {
+    const options: DriftOptions = {
+      ...baselineOptions(flags),
+      thresholds: { psi: number(flags, 'psi'), pValue: number(flags, 'p-value'), missingRate: number(flags, 'missing-rate') },
+    };
+    const report = detectDrift(reference, current, options);
+    return checked(report, () => driftToMarkdown(report, { bins: flags['no-bins'] !== true }));
+  }),
+  baseline: command([rowsFile()], async ([rows], { flags, io }) => {
+    const out = text(flags, 'out');
+    const baseline = createBaseline(rows, baselineOptions(flags));
+    if (out) {
+      await writeJson(out, baseline);
+      const kinds = Object.values(baseline.columns);
+      io.stdout(`baseline of ${baseline.rows} rows written to ${out}: ${kinds.filter((c) => c.kind === 'numeric').length} numeric, ${kinds.filter((c) => c.kind === 'categorical').length} categorical, ${kinds.filter((c) => c.kind === 'skipped').length} skipped`);
+    } else {
+      io.stdout(JSON.stringify(baseline, null, 2));
+    }
+    return {};
+  }),
+  validate: command([contractFile, rowsFile()], async ([contract, rows], { flags }) => {
+    const now = text(flags, 'now');
+    const report = validate(contract, rows, {
+      now: now ? new Date(now) : undefined,
+      maxIssues: number(flags, 'max-issues'),
+      coerce: flags.strict !== true,
+    });
+    return checked(report, () => validationToMarkdown(report, { maxIssues: number(flags, 'show') }));
+  }),
+  infer: command([rowsFile()], async ([rows], { flags, io, asJson }) => {
+    const name = text(flags, 'name');
+    if (!name) throw new UsageError('--name is required');
+    const contract = inferContract(rows, { name, enumMaxDistinct: number(flags, 'enum-max'), margin: number(flags, 'margin') });
+    const out = text(flags, 'out');
+    if (out) {
+      await writeJson(out, contract);
+      io.stdout(`contract "${name}" with ${Object.keys(contract.columns).length} columns written to ${out}`);
+    } else if (asJson) {
+      io.stdout(JSON.stringify(contract, null, 2));
+    } else {
+      io.stdout(contractToMarkdown(contract));
+    }
+    return {};
+  }),
+  profile: command([rowsFile()], async ([rows], { flags }) => {
+    const report = profile(rows, { columns: list(flags, 'columns'), bins: number(flags, 'bins') });
+    return { report, markdown: () => profileToMarkdown(report) };
+  }),
+};
+
 /**
  * Runs the command line with the given arguments (without `node` and the script name) and
  * returns the exit code: 0 when the check passed, 1 when it failed, 2 on a usage error.
@@ -144,94 +256,15 @@ export async function run(argv: readonly string[], io: CliIO = defaultIO()): Pro
   }
   const asJson = flags.json === true;
   const fail = flags['no-fail'] !== true;
-  const emit = (report: unknown, markdown: () => string) => io.stdout(asJson ? JSON.stringify(report, null, 2) : markdown());
   try {
-    switch (command) {
-      case 'leak': {
-        const rows = await readRows(need(positionals, 0, 'data file'));
-        const label = text(flags, 'label');
-        if (!label) throw new UsageError('--label is required');
-        const report = detectLeakage(rows, {
-          label,
-          features: list(flags, 'features'),
-          exclude: list(flags, 'exclude'),
-          labelTime: text(flags, 'label-time'),
-          featureTimes: list(flags, 'feature-times'),
-          minSamples: number(flags, 'min-samples'),
-          bins: number(flags, 'bins'),
-          thresholds: { association: number(flags, 'association'), labelCopy: number(flags, 'label-copy'), future: number(flags, 'future') },
-        });
-        emit(report, () => leakageToMarkdown(report));
-        return report.ok || !fail ? 0 : 1;
-      }
-      case 'overlap': {
-        const train = await readRows(need(positionals, 0, 'train file'));
-        const test = await readRows(need(positionals, 1, 'test file'));
-        const report = detectOverlap(train, test, { keys: list(flags, 'keys'), columns: list(flags, 'columns'), examples: number(flags, 'examples') });
-        emit(report, () => overlapToMarkdown(report));
-        return report.ok || !fail ? 0 : 1;
-      }
-      case 'drift': {
-        const reference = await readReference(need(positionals, 0, 'reference file'));
-        const current = await readRows(need(positionals, 1, 'current file'));
-        const options: DriftOptions = {
-          ...baselineOptions(flags),
-          thresholds: { psi: number(flags, 'psi'), pValue: number(flags, 'p-value'), missingRate: number(flags, 'missing-rate') },
-        };
-        const report = detectDrift(reference, current, options);
-        emit(report, () => driftToMarkdown(report, { bins: flags['no-bins'] !== true }));
-        return report.ok || !fail ? 0 : 1;
-      }
-      case 'baseline': {
-        const rows = await readRows(need(positionals, 0, 'data file'));
-        const out = text(flags, 'out');
-        const baseline = createBaseline(rows, baselineOptions(flags));
-        if (out) {
-          await writeJson(out, baseline);
-          const kinds = Object.values(baseline.columns);
-          io.stdout(`baseline of ${baseline.rows} rows written to ${out}: ${kinds.filter((c) => c.kind === 'numeric').length} numeric, ${kinds.filter((c) => c.kind === 'categorical').length} categorical, ${kinds.filter((c) => c.kind === 'skipped').length} skipped`);
-        } else {
-          io.stdout(JSON.stringify(baseline, null, 2));
-        }
-        return 0;
-      }
-      case 'validate': {
-        const contract = defineContract(await readJson<Contract>(need(positionals, 0, 'contract file')));
-        const rows = await readRows(need(positionals, 1, 'data file'));
-        const now = text(flags, 'now');
-        const report = validate(contract, rows, {
-          now: now ? new Date(now) : undefined,
-          maxIssues: number(flags, 'max-issues'),
-          coerce: flags.strict !== true,
-        });
-        emit(report, () => validationToMarkdown(report, { maxIssues: number(flags, 'show') }));
-        return report.ok || !fail ? 0 : 1;
-      }
-      case 'infer': {
-        const rows = await readRows(need(positionals, 0, 'data file'));
-        const name = text(flags, 'name');
-        if (!name) throw new UsageError('--name is required');
-        const contract = inferContract(rows, { name, enumMaxDistinct: number(flags, 'enum-max'), margin: number(flags, 'margin') });
-        const out = text(flags, 'out');
-        if (out) {
-          await writeJson(out, contract);
-          io.stdout(`contract "${name}" with ${Object.keys(contract.columns).length} columns written to ${out}`);
-        } else if (asJson) {
-          io.stdout(JSON.stringify(contract, null, 2));
-        } else {
-          io.stdout(contractToMarkdown(contract));
-        }
-        return 0;
-      }
-      case 'profile': {
-        const rows = await readRows(need(positionals, 0, 'data file'));
-        const report = profile(rows, { columns: list(flags, 'columns'), bins: number(flags, 'bins') });
-        emit(report, () => profileToMarkdown(report));
-        return 0;
-      }
-      default:
-        throw new UsageError(`unknown command "${command}"`);
-    }
+    const handler = Object.hasOwn(commands, command) ? commands[command] : undefined;
+    if (!handler) throw new UsageError(`unknown command "${command}"`);
+    // Inputs are read one at a time, in order, so a missing second file is reported after the first was read - as before.
+    const values: unknown[] = [];
+    for (const [index, input] of handler.inputs.entries()) values.push(await input.read(need(positionals, index, input.what)));
+    const result = await handler.run(values, { flags, io, asJson });
+    if (result.report !== undefined && result.markdown) io.stdout(asJson ? JSON.stringify(result.report, null, 2) : result.markdown());
+    return result.ok === false && fail ? 1 : 0;
   } catch (error) {
     if (error instanceof UsageError) {
       io.stderr(`leakcheck: ${error.message}\n\n${USAGE}`);
